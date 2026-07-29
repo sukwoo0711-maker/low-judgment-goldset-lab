@@ -1,0 +1,7 @@
+.artifacts/
+.runs/
+.venv/
+__pycache__/
+*.pyc
+*.db
+*.db-*

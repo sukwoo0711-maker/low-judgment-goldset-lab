@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Atomic review label",
+  "type": "object",
+  "required": ["question_id", "target_type", "target_id", "value"],
+  "properties": {
+    "question_id": {"type": "string", "minLength": 1},
+    "target_type": {
+      "enum": ["corpus_evidence", "retrieval_success", "predicate_answered", "predicate_supported", "claim_supported", "contradiction_present", "citation_valid", "abstention_appropriate"]
+    },
+    "target_id": {"type": "string", "minLength": 1},
+    "value": {"enum": ["Y", "N", "U"]},
+    "reason": {"enum": ["version_unknown", "evidence_conflict", "wording_unclear", "expertise_missing"]},
+    "elapsed_ms": {"type": "integer", "minimum": 0}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"value": {"const": "U"}}, "required": ["value"]},
+      "then": {"required": ["reason"]},
+      "else": {"not": {"required": ["reason"]}}
+    }
+  ],
+  "additionalProperties": false
+}

@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Candidate provenance before deduplication",
+  "type": "object",
+  "required": ["question_id", "content_id", "arm", "rank_before_dedup", "content_digest"],
+  "properties": {
+    "question_id": {"type": "string", "minLength": 1},
+    "content_id": {"type": "string", "minLength": 1},
+    "arm": {"enum": ["lexical", "dense", "entity", "glossary", "oracle", "random", "hard_negative", "full_document"]},
+    "rank_before_dedup": {"type": "integer", "minimum": 1},
+    "content_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "inspection_receipt": {"type": "string"}
+  },
+  "additionalProperties": false
+}
