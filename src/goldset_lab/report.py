@@ -16,7 +16,7 @@ def _cell(value: Any) -> str:
 
 
 def _case_markdown(
-    fixture: dict[str, Any], result: dict[str, Any], labels: dict[tuple[str, str], str]
+    fixture: dict[str, Any], result: dict[str, Any], labels: dict[tuple[str, str], str], mode: str
 ) -> str:
     retrieval = result.get("retrieval", [])
     result_lines = []
@@ -30,11 +30,12 @@ def _case_markdown(
     citations = ", ".join(f"`{_cell(item)}`" for item in answer.get("citations", [])) or "없음"
     source = fixture.get("source_url", "")
     review = labels.get(("reference_supported", fixture["fact_cluster_id"]), "pending")
-    reference_label = (
-        "INTERNET REFERENCE ANSWER"
-        if review == "Y"
-        else "GENERATED REFERENCE CANDIDATE (not independently approved)"
-    )
+    if review != "Y":
+        reference_label = "GENERATED REFERENCE CANDIDATE (not independently approved)"
+    elif fixture.get("reference_provenance") == "independent_web_verified":
+        reference_label = "INDEPENDENT INTERNET REFERENCE ANSWER"
+    else:
+        reference_label = "APPROVED SYNTHETIC SELF-RETRIEVAL REFERENCE"
     predicates = "; ".join(item["text"] for item in fixture.get("predicates", [])) or "없음"
     return "\n".join(
         [
@@ -104,8 +105,15 @@ def main(argv: list[str] | None = None) -> int:
     for start in range(0, len(fixtures), args.cases_per_file):
         batch = fixtures[start : start + args.cases_per_file]
         filename = f"cases-{start + 1:04d}-{start + len(batch):04d}.md"
-        body = ["# 질의별 상세 결과", ""]
-        body.extend(_case_markdown(item, result_by_id[item["question_id"]], labels) for item in batch)
+        body = [
+            "# 질의별 상세 결과",
+            "",
+            f"> 이 파일은 `{args.mode}` 실행의 {len(batch)}개 질의입니다. 독립 인터넷 기준답 실험으로 간주하지 않으며, full run 이전에는 품질 주장을 금지합니다.",
+            "",
+            "> 데이터 발췌·요약은 각 REFERENCE 원문에서 변경되었으며 CC BY-NC-SA 2.0 KR 조건을 따릅니다. 저장소의 MIT 라이선스는 코드에만 적용됩니다.",
+            "",
+        ]
+        body.extend(_case_markdown(item, result_by_id[item["question_id"]], labels, args.mode) for item in batch)
         path = args.out_dir / filename
         path.write_text("\n".join(body), encoding="utf-8", newline="\n")
         index_lines.append(f"- [{filename}]({filename}) — {len(batch)}건 · SHA-256 `{file_sha256(path)}`")

@@ -84,7 +84,7 @@ python -m goldset_lab.report `
 
 `fixture_builder`와 `local_runner`의 기본 추론 endpoint는 `127.0.0.1`이며 loopback 이외 주소는 거부합니다. 이것은 애플리케이션 수준 통제입니다. 외부 연결 0을 입증하려면 회사 PC의 outbound deny와 별도 연결 관측 증거가 필요합니다.
 
-현재 `fixture_builder`는 공개 snapshot에서 질문을 만들고 같은 계열 snapshot을 다시 찾는 `synthetic_self_retrieval_diagnostic`입니다. 실제 별도 인터넷 source에서 얻은 독립 기준답으로 오해하면 안 됩니다. 최종 보고서는 사람이 `reference_supported=Y`로 승인한 경우에만 `INTERNET REFERENCE ANSWER`라고 표시하며, 그 전에는 `GENERATED REFERENCE CANDIDATE`라고 표시합니다.
+현재 `fixture_builder`는 공개 snapshot에서 질문을 만들고 같은 계열 snapshot을 다시 찾는 `synthetic_self_retrieval_diagnostic`입니다. 실제 별도 인터넷 source에서 얻은 독립 기준답으로 오해하면 안 됩니다. 같은 snapshot에서 만든 승인 답은 `APPROVED SYNTHETIC SELF-RETRIEVAL REFERENCE`로 표시합니다. 별도 출처와 독립 provenance가 검증된 fixture만 `INDEPENDENT INTERNET REFERENCE ANSWER`라고 표시합니다.
 
 12건 smoke에는 세 명령 모두 `--mode smoke`를 사용하고 builder에는 `--target 12`를 지정합니다. 32건 diagnostic은 `--mode diagnostic --target 32`, 전체 실행은 기본 `--mode full --target 1000`입니다. smoke와 diagnostic 결과에는 `quality_claim_prohibited`가 기록됩니다.
 

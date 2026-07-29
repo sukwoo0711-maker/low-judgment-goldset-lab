@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -96,6 +97,8 @@ def _ask(item: ReviewItem, input_fn: Callable[[str], str]) -> tuple[str, str | N
 
 
 def main(argv: list[str] | None = None) -> int:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser()
     parser.add_argument("--fixtures", required=True, type=Path)
     parser.add_argument("--events", required=True, type=Path)
@@ -189,6 +192,14 @@ def main(argv: list[str] | None = None) -> int:
             for (_, target_type, target_id), label in active.items()
             if target_type == "query_natural" and label["value"] == "Y"
         }
+        cluster_questions: dict[str, set[str]] = {}
+        for row in fixtures:
+            cluster_questions.setdefault(row["fact_cluster_id"], set()).add(row["question_id"])
+        approved_clusters = {
+            cluster
+            for cluster, question_ids in cluster_questions.items()
+            if cluster in reference_y and len(question_ids) == 4 and question_ids <= query_y
+        }
         approved = [
             {
                 "question_id": row["question_id"],
@@ -198,7 +209,7 @@ def main(argv: list[str] | None = None) -> int:
                 "fixture_run_fingerprint": row["run_fingerprint"],
             }
             for row in fixtures
-            if row["fact_cluster_id"] in reference_y and row["question_id"] in query_y
+            if row["fact_cluster_id"] in approved_clusters
         ]
         write_jsonl(args.approved_questions, approved)
         approved_sha256 = file_sha256(args.approved_questions)

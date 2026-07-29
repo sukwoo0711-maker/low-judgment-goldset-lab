@@ -10,7 +10,7 @@ from goldset_lab.fixture_builder import _parse_candidate
 from goldset_lab.io_utils import file_sha256, write_jsonl
 from goldset_lab.local_runner import _valid_answer
 from goldset_lab.ollama_client import LocalEndpointError, generate_json
-from goldset_lab.report import main as report_main
+from goldset_lab.report import _case_markdown, main as report_main
 from goldset_lab.retrieval import BM25
 from goldset_lab.review import build_candidate_queue, reduce_events
 
@@ -88,7 +88,20 @@ class PipelineTests(unittest.TestCase):
             rendered = "".join(path.read_text(encoding="utf-8") for path in (root / "report").glob("cases-*.md"))
             self.assertEqual(rendered.count("\n## q-"), 1000)
             self.assertIn("QUERY: query 1", rendered)
-            self.assertIn("INTERNET REFERENCE ANSWER: internet answer 1000", rendered)
+            self.assertIn("APPROVED SYNTHETIC SELF-RETRIEVAL REFERENCE: internet answer 1000", rendered)
+            self.assertNotIn("INDEPENDENT INTERNET REFERENCE ANSWER", rendered)
+
+    def test_independent_web_reference_has_explicit_label(self) -> None:
+        fixture = {
+            "question_id": "q1", "fact_cluster_id": "f1", "query_kind": "natural",
+            "query": "q", "reference_answer": "a", "predicates": [],
+            "source_url": "https://example.invalid", "source_title": "source",
+            "retrieved_at": "now", "source_revision": "rev", "content_digest": "0" * 64,
+            "reference_provenance": "independent_web_verified",
+        }
+        result = {"retrieval": [], "local_answer": {"status": "abstain", "answer": "", "citations": []}}
+        rendered = _case_markdown(fixture, result, {("reference_supported", "f1"): "Y"}, "full")
+        self.assertIn("INDEPENDENT INTERNET REFERENCE ANSWER", rendered)
 
     def test_review_queue_deduplicates_reference_by_cluster(self) -> None:
         fixtures = [
