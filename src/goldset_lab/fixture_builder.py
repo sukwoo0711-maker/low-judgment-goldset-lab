@@ -37,34 +37,64 @@ def _bounded(text: str, limit: int = 1800) -> str:
     return re.sub(r"\s+", " ", text).strip()[:limit]
 
 
-def _parse_candidate(result: dict[str, Any]) -> tuple[str, str, list[dict[str, str]]] | None:
+# Stable identifiers for why one model response was discarded. The attempt log
+# records these so a low valid rate can be attributed to a named gate instead of
+# an undifferentiated "invalid" bucket.
+REJECT_REASONS = (
+    "ok",
+    "explicit_skip",
+    "missing_reference_answer",
+    "missing_predicate",
+    "queries_not_four",
+    "query_item_malformed",
+    "kinds_incomplete",
+    "empty_query_text",
+    "duplicate_query_text",
+    "mixed_has_no_latin",
+    "spacing_has_no_marker",
+    "duplicate_of_previous_pass",
+)
+
+
+def _parse_candidate_with_reason(
+    result: dict[str, Any]
+) -> tuple[tuple[str, str, list[dict[str, str]]] | None, str]:
+    """Parse one candidate and name the gate that rejected it."""
     if result.get("skip") is True:
-        return None
+        return None, "explicit_skip"
     answer = result.get("reference_answer")
     predicate = result.get("predicate")
     queries = result.get("queries")
     required_kinds = {"natural", "mixed", "spacing_abbreviation", "paraphrase"}
-    if not isinstance(answer, str) or not answer.strip() or not isinstance(predicate, str) or not predicate.strip():
-        return None
+    if not isinstance(answer, str) or not answer.strip():
+        return None, "missing_reference_answer"
+    if not isinstance(predicate, str) or not predicate.strip():
+        return None, "missing_predicate"
     if not isinstance(queries, list) or len(queries) != 4:
-        return None
+        return None, "queries_not_four"
     normalized = []
     for item in queries:
         if not isinstance(item, dict) or item.get("kind") not in required_kinds or not isinstance(item.get("text"), str):
-            return None
+            return None, "query_item_malformed"
         normalized.append({"kind": item["kind"], "text": item["text"].strip()})
-    if {item["kind"] for item in normalized} != required_kinds or any(not item["text"] for item in normalized):
-        return None
+    if {item["kind"] for item in normalized} != required_kinds:
+        return None, "kinds_incomplete"
+    if any(not item["text"] for item in normalized):
+        return None, "empty_query_text"
     normalized_texts = {re.sub(r"\s+", "", item["text"]).casefold() for item in normalized}
     if len(normalized_texts) != 4:
-        return None
+        return None, "duplicate_query_text"
     mixed = next(item["text"] for item in normalized if item["kind"] == "mixed")
     spacing = next(item["text"] for item in normalized if item["kind"] == "spacing_abbreviation")
-    if not re.search(r"[A-Za-z]", mixed) or not (
-        re.search(r"[A-Z]{2,}|\bBG3\b", spacing) or "  " in spacing
-    ):
-        return None
-    return answer.strip(), predicate.strip(), normalized
+    if not re.search(r"[A-Za-z]", mixed):
+        return None, "mixed_has_no_latin"
+    if not (re.search(r"[A-Z]{2,}|\bBG3\b", spacing) or "  " in spacing):
+        return None, "spacing_has_no_marker"
+    return (answer.strip(), predicate.strip(), normalized), "ok"
+
+
+def _parse_candidate(result: dict[str, Any]) -> tuple[str, str, list[dict[str, str]]] | None:
+    return _parse_candidate_with_reason(result)[0]
 
 
 def _parse_candidates(result: dict[str, Any]) -> list[tuple[str, str, list[dict[str, str]]]]:
@@ -82,11 +112,12 @@ def _parse_candidates(result: dict[str, Any]) -> list[tuple[str, str, list[dict[
 
 def _generate_candidate(
     chunk: Chunk, *, endpoint: str, model: str, seed: int
-) -> tuple[list[tuple[str, str, list[dict[str, str]]]], dict[str, Any], str]:
+) -> tuple[list[tuple[str, str, list[dict[str, str]]]], dict[str, Any], str, list[str]]:
     evidence = _bounded(chunk.text)
     base_prompt = f"TITLE: {chunk.title}\nPUBLIC EVIDENCE:\n<<<{evidence}>>>"
     parsed_candidates = []
     usages = []
+    reasons = []
     saw_skip = False
     for pass_number in (1, 2):
         exclusion = ""
@@ -94,13 +125,17 @@ def _generate_candidate(
             exclusion = f"\nChoose a different fact from this already used answer: {parsed_candidates[0][0]}"
         raw, usage = generate_json(endpoint=endpoint, model=model, system=SYSTEM, prompt=base_prompt + exclusion, seed=seed + chunk.chunk_id + pass_number * 7919)
         usages.append(usage)
-        parsed = _parse_candidate(raw)
+        parsed, reason = _parse_candidate_with_reason(raw)
         saw_skip = saw_skip or raw.get("skip") is True
-        if parsed is not None and all(re.sub(r"\s+", "", parsed[0]).casefold() != re.sub(r"\s+", "", prior[0]).casefold() for prior in parsed_candidates):
-            parsed_candidates.append(parsed)
+        if parsed is not None:
+            if all(re.sub(r"\s+", "", parsed[0]).casefold() != re.sub(r"\s+", "", prior[0]).casefold() for prior in parsed_candidates):
+                parsed_candidates.append(parsed)
+            else:
+                reason = "duplicate_of_previous_pass"
+        reasons.append(reason)
     status = "valid" if parsed_candidates else ("explicit_skip" if saw_skip else "invalid")
     usage_summary = {"calls": usages, "call_count": len(usages)}
-    return parsed_candidates, usage_summary, status
+    return parsed_candidates, usage_summary, status, reasons
 
 
 def _fixture_rows(
@@ -161,7 +196,7 @@ def build_rows(
         if emitted >= target_queries:
             break
         try:
-            parsed, usage, _ = _generate_candidate(chunk, endpoint=endpoint, model=model, seed=seed)
+            parsed, usage, _, _ = _generate_candidate(chunk, endpoint=endpoint, model=model, seed=seed)
         except LocalEndpointError:
             continue
         if not parsed:
@@ -262,12 +297,12 @@ def main(argv: list[str] | None = None) -> int:
             if chunk.chunk_id in attempted_ids:
                 continue
             try:
-                parsed, usage, status = _generate_candidate(
+                parsed, usage, status, reasons = _generate_candidate(
                     chunk, endpoint=args.endpoint, model=args.model, seed=args.seed
                 )
                 error = None
             except Exception as exc:
-                parsed, usage, status = None, {}, "error"
+                parsed, usage, status, reasons = None, {}, "error", []
                 error = f"{type(exc).__name__}: {exc}"
                 consecutive_errors += 1
             else:
@@ -278,6 +313,7 @@ def main(argv: list[str] | None = None) -> int:
                         "chunk_id": chunk.chunk_id,
                         "chunk_digest": chunk.content_digest,
                         "status": status,
+                        "reasons": reasons,
                         "usage": usage,
                         "error": error,
                         "run_fingerprint": run_fingerprint,
