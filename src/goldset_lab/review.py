@@ -72,6 +72,9 @@ def reduce_events(events: list[dict[str, Any]]) -> tuple[dict[tuple[str, str, st
                 label["reason"] = event["reason"]
             if "elapsed_ms" in event:
                 label["elapsed_ms"] = event["elapsed_ms"]
+            for optional in ("decision_source", "confidence"):
+                if optional in event:
+                    label[optional] = event[optional]
             validate_atomic_label(label)
             active[key] = label
             if key in order:
@@ -106,6 +109,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--manifest", required=True, type=Path)
     parser.add_argument("--approved-questions", type=Path)
     parser.add_argument("--approved-fixtures", type=Path)
+    parser.add_argument("--prelabels", type=Path)
+    parser.add_argument("--prelabel-manifest", type=Path)
     args = parser.parse_args(argv)
     fixtures = load_jsonl(args.fixtures)
     fixture_fingerprints = {row.get("run_fingerprint") for row in fixtures}
@@ -119,6 +124,15 @@ def main(argv: list[str] | None = None) -> int:
         {"question_id": item.question_id, "target_type": item.target_type, "target_id": item.target_id}
         for item in queue
     ]
+    prelabels_sha256 = file_sha256(args.prelabels) if args.prelabels and args.prelabels.exists() else None
+    prelabel_manifest_sha256 = None
+    if prelabels_sha256:
+        if not args.prelabel_manifest or not args.prelabel_manifest.exists():
+            raise SystemExit("prelabels require a completed triage manifest")
+        triage_manifest = json.loads(args.prelabel_manifest.read_text(encoding="utf-8"))
+        if triage_manifest.get("complete") is not True or triage_manifest.get("fixtures_sha256") != file_sha256(args.fixtures) or triage_manifest.get("prelabels_sha256") != prelabels_sha256:
+            raise SystemExit("triage manifest is not complete or bound to fixtures/prelabels")
+        prelabel_manifest_sha256 = file_sha256(args.prelabel_manifest)
     review_payload = {
         "schema_version": 1,
         "fixtures_sha256": file_sha256(args.fixtures),
@@ -126,6 +140,8 @@ def main(argv: list[str] | None = None) -> int:
         "review_queue_sha256": object_sha256(queue_contract),
         "review_contract_version": 1,
         "reference_canary": next(iter(reference_canaries)),
+        "prelabels_sha256": prelabels_sha256,
+        "prelabel_manifest_sha256": prelabel_manifest_sha256,
     }
     review_fingerprint = object_sha256(review_payload)
     if not args.manifest.exists() and (args.events.exists() or args.labels.exists()):
@@ -144,6 +160,13 @@ def main(argv: list[str] | None = None) -> int:
     if any(event.get("review_fingerprint") != review_fingerprint for event in events):
         raise SystemExit("review event fingerprint mismatch")
     active, order = reduce_events(events)
+    if args.prelabels and args.prelabels.exists():
+        for label in load_jsonl(args.prelabels):
+            validate_atomic_label(label)
+            key = (label["question_id"], label["target_type"], label["target_id"])
+            if key not in {item.key for item in queue}:
+                raise SystemExit("prelabel does not belong to the review queue")
+            active.setdefault(key, label)
     args.events.parent.mkdir(parents=True, exist_ok=True)
     with args.events.open("a", encoding="utf-8", newline="\n") as output:
         index = 0
@@ -170,6 +193,7 @@ def main(argv: list[str] | None = None) -> int:
                 "target_id": item.target_id,
                 "value": value,
                 "elapsed_ms": round((time.perf_counter() - started) * 1000),
+                "decision_source": "human",
             }
             if reason:
                 label["reason"] = reason
@@ -219,6 +243,13 @@ def main(argv: list[str] | None = None) -> int:
             "approved_questions_sha256": approved_sha256,
             "approved_question_count": len(approved),
             "review_complete": len(active) == len(queue),
+            "labels_sha256": file_sha256(args.labels),
+            "label_count": len(active),
+            "human_y_count": sum(1 for label in active.values() if label["value"] == "Y" and label.get("decision_source", "human") == "human"),
+            "decision_source_counts": {
+                source: sum(1 for label in active.values() if label.get("decision_source", "human") == source)
+                for source in ("human", "deterministic", "local_model_consensus")
+            },
         }
         args.manifest.write_text(
             json.dumps(review_manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"

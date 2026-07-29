@@ -12,6 +12,8 @@
     "value": {"enum": ["Y", "N", "U"]},
     "reason": {"enum": ["version_unknown", "evidence_conflict", "wording_unclear", "expertise_missing"]},
     "elapsed_ms": {"type": "integer", "minimum": 0}
+    ,"decision_source": {"enum": ["human", "deterministic", "local_model_consensus"]}
+    ,"confidence": {"type": "number", "minimum": 0, "maximum": 1}
   },
   "allOf": [
     {

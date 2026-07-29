@@ -15,6 +15,7 @@ from .contracts import load_jsonl, scan_canary, sha256_text, validate_mode_count
 from .io_utils import file_sha256, object_sha256, stable_json
 from .ollama_client import LocalEndpointError, generate_json, model_info
 from .retrieval import BM25
+from .run_lock import acquire_model_lock, acquire_run_lock
 
 
 SYSTEM = """Answer only from LOCAL EVIDENCE below.
@@ -27,7 +28,7 @@ Return JSON only."""
 
 
 def _excerpt(text: str, limit: int = 360) -> str:
-    return re.sub(r"\s+", " ", text).strip()[:limit]
+    return re.sub(r"\s+", " ", text).strip()[:limit].rstrip()
 
 
 def _valid_answer(value: dict[str, Any], allowed: set[str]) -> bool:
@@ -48,12 +49,24 @@ def _existing_ids(path: Path) -> set[str]:
     return {row["question_id"] for row in load_jsonl(path)}
 
 
+def _attempt_counts(rows: list[dict[str, Any]], run_fingerprint: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        if row.get("run_fingerprint") == run_fingerprint and row.get("status") == "error":
+            question_id = row.get("question_id")
+            if isinstance(question_id, str):
+                counts[question_id] = counts.get(question_id, 0) + 1
+    return counts
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--db", required=True, type=Path)
     parser.add_argument("--questions", required=True, type=Path)
     parser.add_argument("--results", required=True, type=Path)
     parser.add_argument("--manifest", required=True, type=Path)
+    parser.add_argument("--attempts", type=Path)
+    parser.add_argument("--max-attempts", type=int, default=3)
     parser.add_argument("--model", default="qwen2.5:7b")
     parser.add_argument("--endpoint", default="http://127.0.0.1:11434")
     parser.add_argument("--top-k", type=int, default=5)
@@ -61,7 +74,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--canary", default="")
     parser.add_argument("--review-manifest", required=True, type=Path)
     parser.add_argument("--mode", choices=("smoke", "diagnostic", "full"), default="full")
+    parser.add_argument("--recover-stale-lock", action="store_true")
+    parser.add_argument("--skip-shared-model-lock", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
+    if args.max_attempts < 1 or args.max_attempts > 10:
+        raise SystemExit("max-attempts must be between 1 and 10")
     if args.top_k < 1 or args.top_k > 10:
         raise SystemExit("top-k must be between 1 and 10")
     questions = load_jsonl(args.questions)
@@ -114,9 +131,13 @@ def main(argv: list[str] | None = None) -> int:
         "endpoint_scope": "loopback-only",
         "top_k": args.top_k,
         "seed": args.seed,
+        "max_attempts": args.max_attempts,
         "prompt_sha256": sha256_text(SYSTEM),
     }
     run_fingerprint = object_sha256(fingerprint_payload)
+    acquire_run_lock(args.manifest.with_suffix(".lock"), run_fingerprint, recover_stale=args.recover_stale_lock)
+    if not args.skip_shared_model_lock:
+        acquire_model_lock(args.endpoint, run_fingerprint, recover_stale=args.recover_stale_lock)
     manifest = {
         **fingerprint_payload,
         "run_fingerprint": run_fingerprint,
@@ -136,16 +157,22 @@ def main(argv: list[str] | None = None) -> int:
     else:
         args.manifest.parent.mkdir(parents=True, exist_ok=True)
         args.manifest.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    attempts_path = args.attempts or args.results.with_suffix(".attempts.jsonl")
     existing_rows = load_jsonl(args.results) if args.results.exists() else []
     if any(row.get("run_fingerprint") != run_fingerprint for row in existing_rows):
         raise SystemExit("result row fingerprint mismatch")
-    if any(row.get("error") for row in existing_rows):
-        raise SystemExit("existing run contains model errors; retry in a new immutable run directory")
     completed = {row["question_id"] for row in existing_rows}
+    attempt_rows = load_jsonl(attempts_path) if attempts_path.exists() else []
+    counts = _attempt_counts(attempt_rows, run_fingerprint)
     consecutive_errors = 0
-    with args.results.open("a", encoding="utf-8", newline="\n") as output:
+    attempts_path.parent.mkdir(parents=True, exist_ok=True)
+    with args.results.open("a", encoding="utf-8", newline="\n") as output, attempts_path.open(
+        "a", encoding="utf-8", newline="\n"
+    ) as attempt_output:
         for position, question in enumerate(questions, 1):
             if question["question_id"] in completed:
+                continue
+            if counts.get(question["question_id"], 0) >= args.max_attempts:
                 continue
             started = time.perf_counter()
             hits = engine.search(question["query"], args.top_k)
@@ -188,10 +215,22 @@ def main(argv: list[str] | None = None) -> int:
                 if not _valid_answer(answer, set(citation_map.values())):
                     raise LocalEndpointError("answer violated the structured citation contract")
             except Exception as exc:
-                answer = {"status": "error", "answer": "", "citations": []}
-                usage = {}
                 error = f"{type(exc).__name__}: {exc}"
                 consecutive_errors += 1
+                counts[question["question_id"]] = counts.get(question["question_id"], 0) + 1
+                attempt_output.write(stable_json({
+                    "question_id": question["question_id"],
+                    "position": position,
+                    "status": "error",
+                    "error": error,
+                    "attempt": counts[question["question_id"]],
+                    "elapsed_ms": round((time.perf_counter() - started) * 1000, 3),
+                    "run_fingerprint": run_fingerprint,
+                }) + "\n")
+                attempt_output.flush()
+                if consecutive_errors >= 3:
+                    raise SystemExit("circuit breaker: three consecutive model errors")
+                continue
             else:
                 consecutive_errors = 0
             row = {
@@ -201,16 +240,21 @@ def main(argv: list[str] | None = None) -> int:
                 "local_answer": answer,
                 "usage": usage,
                 "elapsed_ms": round((time.perf_counter() - started) * 1000, 3),
-                "error": error,
+                "error": None,
                 "run_fingerprint": run_fingerprint,
                 "grounding_status": "structurally_cited_not_yet_reviewed",
             }
             output.write(stable_json(row) + "\n")
             output.flush()
+            completed.add(question["question_id"])
             if position % 25 == 0:
                 print(f"progress {position}/{len(questions)}", flush=True)
-            if consecutive_errors >= 3:
-                raise SystemExit("circuit breaker: three consecutive model errors")
+    remaining = set(ids) - completed
+    exhausted = sorted(item for item in remaining if counts.get(item, 0) >= args.max_attempts)
+    if exhausted:
+        raise SystemExit(f"{len(exhausted)} questions exhausted max attempts; see {attempts_path}")
+    if remaining:
+        raise SystemExit(f"{len(remaining)} retryable questions remain; rerun the same command")
     return 0
 
 

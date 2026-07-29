@@ -113,6 +113,16 @@ oracle 결과는 corpus 진단 상한일 뿐 production 점수와 합산하지 �
 
 시간을 채웠다는 사실만으로 합격하지 않습니다. threshold는 smoke 측정 후 freeze하며, 결과에는 `local bench only`를 표시합니다.
 
+구현된 soak runner는 기본값과 정식 실행에서 14,400초 미만을 거부합니다. 짧은 기능시험은 명시적 `--allow-short-test`로만 허용하고 결과에 `short_test=true`를 남깁니다. 각 반복은 별도 immutable 결과·manifest로 보존하며 30초 간격으로 GPU memory와 local inference runtime working set을 표본화합니다. 네트워크 0은 runner가 주장하지 않고 별도 OS 관측 증거를 요구합니다.
+
+## 저판단 자동 triage
+
+사람의 자유서술을 줄이기 위해 명백한 비질문·답 누출·지원하지 않는 문자군을 deterministic하게 N으로 분류합니다. 서로 다른 두 seed의 local model이 모두 N으로 판정한 항목도 `local_model_consensus` N 후보로 분류합니다. 자동 Y는 만들지 않으며 Y/U와 불일치는 사람에게 Y/N/U로 표시합니다.
+
+자동 라벨에는 `decision_source`와 `confidence`를 기록하며 사람 라벨로 위장하지 않습니다. 자동 승인율, 사람 검토율, 사람 표본감사에서의 불일치율을 별도로 보고하기 전에는 low-judgment 품질이 입증됐다고 주장하지 않습니다.
+
+독립 웹 reference로 answer·predicate·evidence가 교체되면 기존 review를 재사용하지 않습니다. enriched fixture hash와 직접 일치하는 새 review manifest, labels hash, 전 항목 human Y가 있어야 full report가 생성됩니다. same-source refresh는 독립 reference로 세지 않습니다.
+
 ## 외부 전송 경계
 
 | 구성 | 읽을 수 있는 데이터 | 전송 대상 | 허용 조건 |

@@ -12,6 +12,7 @@ from .contracts import load_jsonl
 from .io_utils import file_sha256, object_sha256, stable_json, write_jsonl
 from .ollama_client import LocalEndpointError, generate_json, model_info
 from .source_manifest import load_and_validate
+from .run_lock import acquire_model_lock, acquire_run_lock
 
 
 SYSTEM = """You create Korean evaluation candidates from public BG3 evidence.
@@ -66,21 +67,40 @@ def _parse_candidate(result: dict[str, Any]) -> tuple[str, str, list[dict[str, s
     return answer.strip(), predicate.strip(), normalized
 
 
+def _parse_candidates(result: dict[str, Any]) -> list[tuple[str, str, list[dict[str, str]]]]:
+    if result.get("skip") is True:
+        return []
+    raw = result.get("candidates")
+    if not isinstance(raw, list) or not 1 <= len(raw) <= 2:
+        return []
+    parsed = [item for item in (_parse_candidate(candidate) for candidate in raw) if item is not None]
+    if len(parsed) != len(raw):
+        return []
+    answers = {re.sub(r"\s+", "", item[0]).casefold() for item in parsed}
+    return parsed if len(answers) == len(parsed) else []
+
+
 def _generate_candidate(
     chunk: Chunk, *, endpoint: str, model: str, seed: int
-) -> tuple[tuple[str, str, list[dict[str, str]]] | None, dict[str, Any], str]:
+) -> tuple[list[tuple[str, str, list[dict[str, str]]]], dict[str, Any], str]:
     evidence = _bounded(chunk.text)
-    prompt = f"TITLE: {chunk.title}\nPUBLIC EVIDENCE:\n<<<{evidence}>>>"
-    raw, usage = generate_json(
-        endpoint=endpoint,
-        model=model,
-        system=SYSTEM,
-        prompt=prompt,
-        seed=seed + chunk.chunk_id,
-    )
-    parsed = _parse_candidate(raw)
-    status = "valid" if parsed is not None else ("explicit_skip" if raw.get("skip") is True else "invalid")
-    return parsed, usage, status
+    base_prompt = f"TITLE: {chunk.title}\nPUBLIC EVIDENCE:\n<<<{evidence}>>>"
+    parsed_candidates = []
+    usages = []
+    saw_skip = False
+    for pass_number in (1, 2):
+        exclusion = ""
+        if parsed_candidates:
+            exclusion = f"\nChoose a different fact from this already used answer: {parsed_candidates[0][0]}"
+        raw, usage = generate_json(endpoint=endpoint, model=model, system=SYSTEM, prompt=base_prompt + exclusion, seed=seed + chunk.chunk_id + pass_number * 7919)
+        usages.append(usage)
+        parsed = _parse_candidate(raw)
+        saw_skip = saw_skip or raw.get("skip") is True
+        if parsed is not None and all(re.sub(r"\s+", "", parsed[0]).casefold() != re.sub(r"\s+", "", prior[0]).casefold() for prior in parsed_candidates):
+            parsed_candidates.append(parsed)
+    status = "valid" if parsed_candidates else ("explicit_skip" if saw_skip else "invalid")
+    usage_summary = {"calls": usages, "call_count": len(usages)}
+    return parsed_candidates, usage_summary, status
 
 
 def _fixture_rows(
@@ -144,14 +164,13 @@ def build_rows(
             parsed, usage, _ = _generate_candidate(chunk, endpoint=endpoint, model=model, seed=seed)
         except LocalEndpointError:
             continue
-        if parsed is None:
+        if not parsed:
             continue
-        cluster_number += 1
-        for row in _fixture_rows(
-            chunk, parsed, usage, cluster_number=cluster_number, emitted=emitted, limit=target_queries
-        ):
-            emitted += 1
-            yield row
+        for candidate in parsed:
+            cluster_number += 1
+            for row in _fixture_rows(chunk, candidate, usage, cluster_number=cluster_number, emitted=emitted, limit=target_queries):
+                emitted += 1
+                yield row
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -163,11 +182,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--attempts", type=Path)
     parser.add_argument("--run-manifest", type=Path)
     parser.add_argument("--target", type=int, default=1000)
+    parser.add_argument("--minimum-output", type=int)
     parser.add_argument("--mode", choices=("smoke", "diagnostic", "full"), default="full")
     parser.add_argument("--trusted-manifest-sha256", required=True)
     parser.add_argument("--model", default="qwen2.5:7b")
     parser.add_argument("--endpoint", default="http://127.0.0.1:11434")
     parser.add_argument("--seed", type=int, default=20260730)
+    parser.add_argument("--recover-stale-lock", action="store_true")
     args = parser.parse_args(argv)
     validate_mode_count(args.mode, args.target)
     source_manifest = load_and_validate(
@@ -190,6 +211,8 @@ def main(argv: list[str] | None = None) -> int:
     run_fingerprint = object_sha256(fingerprint_payload)
     reference_canary = "REFERENCE_CANARY_" + run_fingerprint[:24]
     run_manifest_path = args.run_manifest or args.fixtures.with_suffix(".manifest.json")
+    acquire_run_lock(run_manifest_path.with_suffix(".lock"), run_fingerprint, recover_stale=args.recover_stale_lock)
+    acquire_model_lock(args.endpoint, run_fingerprint, recover_stale=args.recover_stale_lock)
     attempts_path = args.attempts or args.fixtures.with_suffix(".attempts.jsonl")
     if not run_manifest_path.exists() and (args.fixtures.exists() or attempts_path.exists()):
         raise SystemExit("orphan fixture artifacts exist without a run manifest")
@@ -265,29 +288,27 @@ def main(argv: list[str] | None = None) -> int:
             attempt_output.flush()
             if consecutive_errors >= 3:
                 raise SystemExit("circuit breaker: three consecutive fixture model errors")
-            if parsed is None:
+            if not parsed:
                 continue
-            cluster_number += 1
-            new_rows = _fixture_rows(
-                chunk,
-                parsed,
-                usage,
-                cluster_number=cluster_number,
-                emitted=len(rows),
-                limit=args.target,
-            )
-            for row in new_rows:
-                row["run_fingerprint"] = run_fingerprint
-                row["evaluation_mode"] = args.mode
-                row["evaluation_design"] = "synthetic_self_retrieval_diagnostic"
-                row["reference_canary"] = reference_canary
-                fixture_output.write(stable_json(row) + "\n")
-                rows.append(row)
+            for candidate in parsed:
+                if len(rows) >= args.target:
+                    break
+                cluster_number += 1
+                new_rows = _fixture_rows(chunk, candidate, usage, cluster_number=cluster_number, emitted=len(rows), limit=args.target)
+                for row in new_rows:
+                    row["run_fingerprint"] = run_fingerprint
+                    row["evaluation_mode"] = args.mode
+                    row["evaluation_design"] = "synthetic_self_retrieval_diagnostic"
+                    row["reference_canary"] = reference_canary
+                    fixture_output.write(stable_json(row) + "\n")
+                    rows.append(row)
             fixture_output.flush()
             if len(rows) % 40 == 0:
                 print(f"progress queries={len(rows)}/{args.target} attempts={len(attempted_ids) + 1}", flush=True)
             attempted_ids.add(chunk.chunk_id)
-    if len(rows) < args.target:
+    minimum_output = args.minimum_output if args.minimum_output is not None else args.target
+    validate_mode_count(args.mode, minimum_output)
+    if len(rows) < minimum_output:
         raise SystemExit(f"only generated {len(rows)} of {args.target} required queries")
     projection = [
         {

@@ -58,12 +58,21 @@ python -m goldset_lab.fixture_builder --db <public-bg3.db> `
   --fixtures .artifacts/reference/fixtures.jsonl `
   --questions .artifacts/local-input/questions.jsonl --target 1000
 
-# 기준답 후보와 질의 자연성을 한 화면에 하나씩 Y/N/U로 승인
+# 명백한 형식 오류와 두 local-model seed가 모두 N인 항목만 prelabel
+python -m goldset_lab.auto_triage `
+  --fixtures .artifacts/reference/fixtures.jsonl `
+  --prelabels .artifacts/review/prelabels.jsonl `
+  --uncertain .artifacts/review/uncertain.jsonl `
+  --manifest .artifacts/review/prelabels-manifest.json
+
+# 불일치/U 항목만 한 화면에 하나씩 Y/N/U로 승인
 python -m goldset_lab.review `
   --fixtures .artifacts/reference/fixtures.jsonl `
   --events .artifacts/review/events.jsonl `
   --labels .artifacts/review/labels.jsonl `
   --manifest .artifacts/review/manifest.json `
+  --prelabels .artifacts/review/prelabels.jsonl `
+  --prelabel-manifest .artifacts/review/prelabels-manifest.json `
   --approved-questions .artifacts/local-input/approved-questions.jsonl `
   --approved-fixtures .artifacts/reference/approved-fixtures.jsonl
 
@@ -80,11 +89,24 @@ python -m goldset_lab.report `
   --labels .artifacts/review/labels.jsonl `
   --review-manifest .artifacts/review/manifest.json `
   --out-dir reports/full-run
+
+# 기능 실행과 별개로 최소 4시간 반복 실행
+python -m goldset_lab.soak_runner `
+  --db <public-bg3.db> `
+  --questions .artifacts/local-input/approved-questions.jsonl `
+  --review-manifest .artifacts/review/manifest.json `
+  --out-dir .runs/soak-4h --duration-seconds 14400 --mode full
 ```
 
 `fixture_builder`와 `local_runner`의 기본 추론 endpoint는 `127.0.0.1`이며 loopback 이외 주소는 거부합니다. 이것은 애플리케이션 수준 통제입니다. 외부 연결 0을 입증하려면 회사 PC의 outbound deny와 별도 연결 관측 증거가 필요합니다.
 
 현재 `fixture_builder`는 공개 snapshot에서 질문을 만들고 같은 계열 snapshot을 다시 찾는 `synthetic_self_retrieval_diagnostic`입니다. 실제 별도 인터넷 source에서 얻은 독립 기준답으로 오해하면 안 됩니다. 같은 snapshot에서 만든 승인 답은 `APPROVED SYNTHETIC SELF-RETRIEVAL REFERENCE`로 표시합니다. 별도 출처와 독립 provenance가 검증된 fixture만 `INDEPENDENT INTERNET REFERENCE ANSWER`라고 표시합니다.
+
+독립 reference는 `reference_bundle`로 병합합니다. 별도 공개 웹 수집 bundle, domain allowlist, bundle SHA-256, reference snapshot SHA-256, local corpus SHA-256, 운영자가 승인한 manifest SHA-256이 모두 맞아야 합니다. 동일 evidence digest나 동일 snapshot은 거부합니다. 회사 자료를 이 수집 경로에 넣으면 안 됩니다.
+
+실제 인터넷 RAG adapter는 공개 fixture receipt가 운영자 승인 hash와 일치할 때만 `bg3.wiki` API에 검색어를 전송합니다. 질문과 검색용 hint는 공개 BG3 fixture로 제한됩니다. 검색 응답은 immutable cache와 SHA-256으로 남기고, 관련 문장은 원문 순서를 유지한 채 omission marker로 연결합니다. 독립 reference를 병합하면 answer·predicate·evidence가 바뀌므로 기존 Y 라벨은 폐기하고 enriched fixture 전체를 다시 Y/N/U 검토해야 합니다.
+
+모델을 사용하는 builder, triage, local QA, web reference, soak는 run별 exclusive lock과 공용 localhost-model lock을 사용합니다. 살아 있는 owner가 있으면 두 번째 실행을 거부하며 stale lock은 `--recover-stale-lock`을 명시해야만 복구합니다.
 
 12건 smoke에는 세 명령 모두 `--mode smoke`를 사용하고 builder에는 `--target 12`를 지정합니다. 32건 diagnostic은 `--mode diagnostic --target 32`, 전체 실행은 기본 `--mode full --target 1000`입니다. smoke와 diagnostic 결과에는 `quality_claim_prohibited`가 기록됩니다.
 

@@ -163,7 +163,7 @@ def validate_public_fixture(record: dict[str, Any]) -> None:
 def validate_atomic_label(record: dict[str, Any]) -> None:
     """Validate a single Y/N/U decision without accepting free-form rationale."""
     _require(record, ("question_id", "target_type", "target_id", "value"), "label")
-    allowed = {"question_id", "target_type", "target_id", "value", "reason", "elapsed_ms"}
+    allowed = {"question_id", "target_type", "target_id", "value", "reason", "elapsed_ms", "decision_source", "confidence"}
     if set(record) - allowed:
         raise ContractError("label: additional properties are prohibited")
     _require_strings(record, ("question_id", "target_type", "target_id", "value"), "label")
@@ -183,6 +183,14 @@ def validate_atomic_label(record: dict[str, Any]) -> None:
         or record["elapsed_ms"] < 0
     ):
         raise ContractError("label: elapsed_ms must be a non-negative integer")
+    if record.get("decision_source", "human") not in {"human", "deterministic", "local_model_consensus"}:
+        raise ContractError("label: unknown decision_source")
+    if "confidence" in record and (
+        not isinstance(record["confidence"], (int, float))
+        or isinstance(record["confidence"], bool)
+        or not 0 <= record["confidence"] <= 1
+    ):
+        raise ContractError("label: confidence must be between zero and one")
 
 
 def validate_candidate(record: dict[str, Any]) -> None:
