@@ -42,7 +42,51 @@
 
 로컬 QA 경로는 외부 네트워크와 외부 토큰을 사용하지 않는 구성을 목표로 합니다. 공개 reference fixture 제작 단계의 웹 접근은 별도 작업이며 사내 데이터를 입력하지 않습니다.
 
-현재 상태: 평가 계약을 고정한 초기 체크포인트입니다. 실행 코드는 다음 검증 단위에서 추가합니다.
+현재 상태: 평가 계약과 1,000건 pipeline의 첫 구현이 존재합니다. 실제 fixture와 장기 실행 결과는 아직 생성 전이며 별도 검증 단위로 공개합니다.
+
+## 1,000건 실행 경로
+
+경로에는 사내 자료가 아닌 승인된 공개 SQLite snapshot만 사용합니다. fixture 제작은 공개 원문을 읽는 reference branch이며, local QA에는 `questions.jsonl`만 전달합니다.
+
+```powershell
+$env:PYTHONPATH = "src"
+
+# 승인된 공개 snapshot manifest가 DB hash·domain·license를 묶어야 실행됨
+python -m goldset_lab.fixture_builder --db <public-bg3.db> `
+  --source-manifest <approved-public-source.json> `
+  --trusted-manifest-sha256 <operator-approved-sha256> `
+  --fixtures .artifacts/reference/fixtures.jsonl `
+  --questions .artifacts/local-input/questions.jsonl --target 1000
+
+# 기준답 후보와 질의 자연성을 한 화면에 하나씩 Y/N/U로 승인
+python -m goldset_lab.review `
+  --fixtures .artifacts/reference/fixtures.jsonl `
+  --events .artifacts/review/events.jsonl `
+  --labels .artifacts/review/labels.jsonl `
+  --manifest .artifacts/review/manifest.json `
+  --approved-questions .artifacts/local-input/approved-questions.jsonl `
+  --approved-fixtures .artifacts/reference/approved-fixtures.jsonl
+
+# reference가 없는 질문 projection + 로컬 DB만 사용해 검색·답변
+python -m goldset_lab.local_runner --db <public-bg3.db> `
+  --questions .artifacts/local-input/approved-questions.jsonl `
+  --review-manifest .artifacts/review/manifest.json `
+  --results .runs/results.jsonl --manifest .runs/manifest.json
+
+# QA 완료 후 reference를 join하여 1,000건 전체 Markdown 생성
+python -m goldset_lab.report `
+  --fixtures .artifacts/reference/approved-fixtures.jsonl `
+  --results .runs/results.jsonl `
+  --labels .artifacts/review/labels.jsonl `
+  --review-manifest .artifacts/review/manifest.json `
+  --out-dir reports/full-run
+```
+
+`fixture_builder`와 `local_runner`의 기본 추론 endpoint는 `127.0.0.1`이며 loopback 이외 주소는 거부합니다. 이것은 애플리케이션 수준 통제입니다. 외부 연결 0을 입증하려면 회사 PC의 outbound deny와 별도 연결 관측 증거가 필요합니다.
+
+현재 `fixture_builder`는 공개 snapshot에서 질문을 만들고 같은 계열 snapshot을 다시 찾는 `synthetic_self_retrieval_diagnostic`입니다. 실제 별도 인터넷 source에서 얻은 독립 기준답으로 오해하면 안 됩니다. 최종 보고서는 사람이 `reference_supported=Y`로 승인한 경우에만 `INTERNET REFERENCE ANSWER`라고 표시하며, 그 전에는 `GENERATED REFERENCE CANDIDATE`라고 표시합니다.
+
+12건 smoke에는 세 명령 모두 `--mode smoke`를 사용하고 builder에는 `--target 12`를 지정합니다. 32건 diagnostic은 `--mode diagnostic --target 32`, 전체 실행은 기본 `--mode full --target 1000`입니다. smoke와 diagnostic 결과에는 `quality_claim_prohibited`가 기록됩니다.
 
 ## 개발 검증
 

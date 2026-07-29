@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Approved public source snapshot",
+  "type": "object",
+  "required": ["schema_version", "snapshot_sha256", "source_type", "allowed_domains", "license_basis", "approved_for_public_test", "contains_private_data"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "snapshot_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "source_type": {"const": "public_web_snapshot"},
+    "allowed_domains": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+    "license_basis": {"type": "string", "minLength": 1},
+    "approved_for_public_test": {"const": true},
+    "contains_private_data": {"const": false}
+  },
+  "additionalProperties": false
+}

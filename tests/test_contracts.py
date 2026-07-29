@@ -11,6 +11,7 @@ from goldset_lab.contracts import (
     validate_atomic_label,
     validate_candidate,
     validate_public_fixture,
+    validate_mode_count,
 )
 
 
@@ -35,6 +36,12 @@ def fixture() -> dict:
 
 
 class ContractTests(unittest.TestCase):
+    def test_mode_minimums_are_explicit(self) -> None:
+        validate_mode_count("smoke", 12)
+        validate_mode_count("diagnostic", 32)
+        validate_mode_count("full", 1000)
+        with self.assertRaises(ContractError):
+            validate_mode_count("smoke", 8)
     def test_public_fixture_is_accepted(self) -> None:
         validate_public_fixture(fixture())
 

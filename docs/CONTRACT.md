@@ -96,6 +96,8 @@ oracle 결과는 corpus 진단 상한일 뿐 production 점수와 합산하지 �
 
 인터넷 원문을 대량 복제하지 않습니다. reference answer와 excerpt는 필요한 범위로 요약·제한하고 직접 출처를 연결합니다. `INTERNET REFERENCE ANSWER`는 평가 기준 후보이며 자동 oracle이 아닙니다.
 
+동일 공개 snapshot에서 질문과 답 후보를 만들고 그 snapshot을 다시 검색하는 실행은 `synthetic_self_retrieval_diagnostic`으로만 부릅니다. 이는 표현 변형과 pipeline 배관을 검사할 수 있지만 독립적인 인터넷-vs-local coverage 평가는 아닙니다. 승인된 별도 웹 passage를 사용하거나 source-document holdout을 적용하기 전에는 독립 기준답 실험이라고 주장하지 않습니다.
+
 최종 verifier는 JSONL의 질의 ID 집합과 Markdown의 질의 ID 집합이 정확히 같고 1,000개 이상인지 검사합니다. 결과가 길면 여러 Markdown 파일로 분할하되 index에서 모든 파일과 건수를 연결합니다.
 
 ## 4시간 soak protocol

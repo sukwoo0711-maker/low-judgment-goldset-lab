@@ -23,6 +23,16 @@ CANONICAL_LABELS = {
     "G": "citation_grounding",
     "X": "abstention_appropriateness",
 }
+MODE_MINIMUMS = {"smoke": 12, "diagnostic": 32, "full": 1000}
+
+
+def validate_mode_count(mode: str, count: int) -> None:
+    if mode not in MODE_MINIMUMS:
+        raise ContractError(f"unknown evaluation mode: {mode}")
+    if count < MODE_MINIMUMS[mode]:
+        raise ContractError(f"{mode} mode requires at least {MODE_MINIMUMS[mode]} cases")
+    if count % 4:
+        raise ContractError("case count must be a multiple of four")
 ATOMIC_TARGET_TYPES = frozenset(
     {
         "corpus_evidence",
@@ -33,6 +43,8 @@ ATOMIC_TARGET_TYPES = frozenset(
         "contradiction_present",
         "citation_valid",
         "abstention_appropriate",
+        "reference_supported",
+        "query_natural",
     }
 )
 

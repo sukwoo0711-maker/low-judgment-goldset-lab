@@ -6,7 +6,7 @@
   "properties": {
     "question_id": {"type": "string", "minLength": 1},
     "target_type": {
-      "enum": ["corpus_evidence", "retrieval_success", "predicate_answered", "predicate_supported", "claim_supported", "contradiction_present", "citation_valid", "abstention_appropriate"]
+      "enum": ["corpus_evidence", "retrieval_success", "predicate_answered", "predicate_supported", "claim_supported", "contradiction_present", "citation_valid", "abstention_appropriate", "reference_supported", "query_natural"]
     },
     "target_id": {"type": "string", "minLength": 1},
     "value": {"enum": ["Y", "N", "U"]},
