@@ -43,6 +43,28 @@ def _resource_sample() -> dict:
     return sample
 
 
+def _signatures(rows: list[dict]) -> dict[str, tuple[str, str]]:
+    return {
+        row["question_id"]: (
+            object_sha256([(hit.get("content_id"), hit.get("rank")) for hit in row.get("retrieval", [])]),
+            object_sha256(row.get("local_answer", {})),
+        )
+        for row in rows
+    }
+
+
+def _gate_status(total: float, phase_counts: dict[str, int], allow_short_test: bool) -> dict:
+    duration_ok = total >= 14400
+    phase_ok = phase_counts.get("fixed_seed_reproducibility", 0) >= 2 and phase_counts.get("varied_seed_robustness", 0) >= 1
+    passed = allow_short_test or (duration_ok and phase_ok)
+    reasons = []
+    if not duration_ok:
+        reasons.append("duration_below_14400")
+    if not phase_ok:
+        reasons.append("phase_coverage_insufficient")
+    return {"duration_gate_passed": duration_ok, "phase_gate_passed": phase_ok, "formal_gate_passed": passed, "completed": passed, "exit_reason": "completed" if passed else ",".join(reasons)}
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--db", required=True, type=Path)
@@ -71,13 +93,23 @@ def main(argv: list[str] | None = None) -> int:
     started_wall = time.time()
     started = time.monotonic()
     iteration = 0
-    question_ids = {row["question_id"] for row in load_jsonl(args.questions)}
+    question_rows = load_jsonl(args.questions)
+    question_id_list = [row["question_id"] for row in question_rows]
+    if len(question_id_list) != len(set(question_id_list)):
+        raise SystemExit("soak questions contain duplicate IDs")
+    question_ids = set(question_id_list)
     latencies: list[float] = []
     errors = 0
+    fixed_baseline: dict[str, tuple[str, str]] | None = None
+    fixed_retrieval_matches = fixed_answer_matches = fixed_comparisons = 0
+    varied_retrieval_matches = varied_answer_matches = varied_comparisons = 0
+    varied_answer_signatures: dict[str, set[str]] = {question_id: set() for question_id in question_ids}
+    phase_counts = {"fixed_seed_reproducibility": 0, "varied_seed_robustness": 0}
+    all_resource_samples = []
     last_elapsed = 0.0
     while time.monotonic() - started < args.duration_seconds or iteration == 0:
         remaining_time = args.duration_seconds - (time.monotonic() - started)
-        if iteration and remaining_time < last_elapsed:
+        if iteration and remaining_time < last_elapsed and args.allow_short_test:
             break
         iteration += 1
         phase = "fixed_seed_reproducibility" if iteration % 2 else "varied_seed_robustness"
@@ -130,13 +162,32 @@ def main(argv: list[str] | None = None) -> int:
             output.write(stable_json(event) + "\n")
         print(f"soak iteration={iteration} elapsed={elapsed:.1f}s errors={errors}", flush=True)
         result_path = iteration_dir / "results.jsonl"
-        result_ids = {row["question_id"] for row in load_jsonl(result_path)} if result_path.exists() else set()
+        result_rows = load_jsonl(result_path) if result_path.exists() else []
+        result_ids = {row["question_id"] for row in result_rows}
         if process.returncode != 0 or result_ids != question_ids:
             raise SystemExit("soak stopped on failed immutable iteration")
+        phase_counts[phase] += 1
+        all_resource_samples.extend(samples)
+        signatures = _signatures(result_rows)
+        if phase == "fixed_seed_reproducibility":
+            if fixed_baseline is None:
+                fixed_baseline = signatures
+            else:
+                for question_id in question_ids:
+                    fixed_comparisons += 1
+                    fixed_retrieval_matches += int(signatures[question_id][0] == fixed_baseline[question_id][0])
+                    fixed_answer_matches += int(signatures[question_id][1] == fixed_baseline[question_id][1])
+        elif fixed_baseline is not None:
+            for question_id in question_ids:
+                varied_comparisons += 1
+                varied_retrieval_matches += int(signatures[question_id][0] == fixed_baseline[question_id][0])
+                varied_answer_matches += int(signatures[question_id][1] == fixed_baseline[question_id][1])
+                varied_answer_signatures[question_id].add(signatures[question_id][1])
         disk_bytes = sum(path.stat().st_size for path in args.out_dir.rglob("*") if path.is_file())
         if disk_bytes > args.max_disk_mib * 1024 * 1024:
             raise SystemExit("soak stopped after exceeding disk limit")
     total = time.monotonic() - started
+    gates = _gate_status(total, phase_counts, args.allow_short_test)
     summary = {
         "schema_version": 1,
         "started_at_epoch": started_wall,
@@ -153,12 +204,23 @@ def main(argv: list[str] | None = None) -> int:
         "events_sha256": file_sha256(events_path),
         "network_observation": "not_observed_by_runner; separate OS evidence required",
         "company_pc_claim": False,
+        "phase_counts": phase_counts,
+        "fixed_retrieval_match_rate": fixed_retrieval_matches / fixed_comparisons if fixed_comparisons else None,
+        "fixed_answer_match_rate": fixed_answer_matches / fixed_comparisons if fixed_comparisons else None,
+        "fixed_comparisons": fixed_comparisons,
+        "varied_retrieval_match_to_fixed_rate": varied_retrieval_matches / varied_comparisons if varied_comparisons else None,
+        "varied_answer_match_to_fixed_rate": varied_answer_matches / varied_comparisons if varied_comparisons else None,
+        "varied_comparisons": varied_comparisons,
+        "varied_answer_unique_signature_count": sum(len(items) for items in varied_answer_signatures.values()),
+        "gpu_memory_mib_peak": max((item["gpu_memory_mib"] for item in all_resource_samples if item["gpu_memory_mib"] is not None), default=None),
+        "ollama_working_set_bytes_peak": max((item["ollama_working_set_bytes"] for item in all_resource_samples if item["ollama_working_set_bytes"] is not None), default=None),
+        **gates,
     }
     (args.out_dir / "summary.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
-    if not args.allow_short_test and total < 14400:
-        raise SystemExit("formal soak ended before the required four-hour duration")
+    if not gates["formal_gate_passed"]:
+        raise SystemExit(gates["exit_reason"])
     return 0
 
 

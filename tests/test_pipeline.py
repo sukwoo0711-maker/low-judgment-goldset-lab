@@ -15,6 +15,7 @@ from goldset_lab.report import _case_markdown, _validate_full_gate, main as repo
 from goldset_lab.retrieval import BM25
 from goldset_lab.review import build_candidate_queue, reduce_events
 from goldset_lab.web_reference_builder import _focused_excerpt
+from goldset_lab.soak_runner import _gate_status, _signatures
 
 
 def chunk(chunk_id: int, title: str, text: str) -> Chunk:
@@ -22,6 +23,20 @@ def chunk(chunk_id: int, title: str, text: str) -> Chunk:
 
 
 class PipelineTests(unittest.TestCase):
+    def test_soak_signatures_separate_retrieval_and_answer(self) -> None:
+        row = {"question_id": "q", "retrieval": [{"content_id": "c", "rank": 1}], "local_answer": {"status": "answered", "answer": "a", "citations": ["c"]}}
+        first = _signatures([row])["q"]
+        second = _signatures([{**row, "local_answer": {"status": "answered", "answer": "b", "citations": ["c"]}}])["q"]
+        self.assertEqual(first[0], second[0])
+        self.assertNotEqual(first[1], second[1])
+
+    def test_formal_soak_gate_requires_duration_and_phase_coverage(self) -> None:
+        phases = {"fixed_seed_reproducibility": 2, "varied_seed_robustness": 1}
+        self.assertTrue(_gate_status(14400, phases, False)["formal_gate_passed"])
+        failed = _gate_status(14399, phases, False)
+        self.assertFalse(failed["completed"])
+        self.assertIn("duration_below_14400", failed["exit_reason"])
+        self.assertTrue(_gate_status(1, {}, True)["formal_gate_passed"])
     def test_full_gate_rejects_same_source_and_nonhuman_or_tampered_labels(self) -> None:
         fixture = {"question_id": "q1", "fact_cluster_id": "f1", "reference_provenance": "independent_web_verified"}
         labels = [
